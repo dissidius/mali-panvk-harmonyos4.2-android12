@@ -145,6 +145,8 @@ union kbase_ioctl_mem_import {
 };
 #define KBASE_IOCTL_MEM_IMPORT                                                                    \
    _IOC(_IOC_READ | _IOC_WRITE, KBASE_IOCTL_TYPE, 22, 24)
+#define KBASE_IOCTL_MEM_IMPORT_32                                                                 \
+   _IOC(_IOC_READ | _IOC_WRITE, KBASE_IOCTL_TYPE, 22, 32)
 #define KBASE_IOCTL_MEM_IMPORT_40                                                                 \
    _IOC(_IOC_READ | _IOC_WRITE, KBASE_IOCTL_TYPE, 22, 40)
 #define BASE_MEM_IMPORT_TYPE_UMM 2
@@ -285,6 +287,9 @@ struct kbase_kmod_dev {
    uint32_t js0_features;
    /* CSF: queue groups instead of job atoms (kbase UAPI 1.x). */
    bool csf;
+   /* Successful MEM_IMPORT ioctl payload size: 0 means default (24 bytes).
+    * Stored per device, rather than globally across unrelated kbase contexts. */
+   uint32_t mem_import_size;
    struct drm_panthor_csif_info csif;
    struct kbase_csf_dev *csfq;
 };
@@ -789,13 +794,28 @@ kbase_kmod_bo_import(struct pan_kmod_dev *dev, int fd)
    req.in.flags = 0xfull | BASE_MEM_SAME_VA;
    req.in.phandle = (uint64_t)(uintptr_t)&dmabuf;
    req.in.type = BASE_MEM_IMPORT_TYPE_UMM;
-   static bool import_40;
-   int ret = pan_kmod_ioctl(dev->fd, import_40 ? KBASE_IOCTL_MEM_IMPORT_40
-                                                : KBASE_IOCTL_MEM_IMPORT, &req);
-   if (ret && errno == ENOTTY && !import_40) {
+   /*
+    * Huawei JM kernels such as Kirin 990 (HarmonyOS 4.2) require the
+    * 32-byte form of MEM_IMPORT nr 22. The standard 24-byte request
+    * returns ENOTTY. Retain the existing 40-byte fallback for newer
+    * kernels, and cache the successful layout per kbase device.
+    */
+   const uint32_t import_size = kbase_dev->mem_import_size;
+   int ret = pan_kmod_ioctl(
+      dev->fd,
+      import_size == 32 ? KBASE_IOCTL_MEM_IMPORT_32 :
+      import_size == 40 ? KBASE_IOCTL_MEM_IMPORT_40 :
+                          KBASE_IOCTL_MEM_IMPORT,
+      &req);
+   if (ret && errno == ENOTTY && import_size == 0 && !kbase_dev->csf) {
+      ret = pan_kmod_ioctl(dev->fd, KBASE_IOCTL_MEM_IMPORT_32, &req);
+      if (!ret)
+         kbase_dev->mem_import_size = 32;
+   }
+   if (ret && errno == ENOTTY && import_size == 0) {
       ret = pan_kmod_ioctl(dev->fd, KBASE_IOCTL_MEM_IMPORT_40, &req);
       if (!ret)
-         import_40 = true;
+         kbase_dev->mem_import_size = 40;
    }
    if (ret) {
       mesa_loge("kbase: MEM_IMPORT of dma-buf fd %d failed (err=%d)", fd, errno);
