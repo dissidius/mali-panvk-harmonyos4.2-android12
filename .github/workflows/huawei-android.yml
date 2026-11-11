@@ -17,9 +17,12 @@ jobs:
       - uses: actions/checkout@v4
       - name: Install Linux host dependencies
         run: |
-          sudo add-apt-repository -y universe
-          sudo apt-get update
-          sudo apt-get install -y --no-install-recommends \
+          # Prefer upstream Ubuntu mirrors over the runner's Azure mirror.
+          # Azure DNS returned intermittent NXDOMAIN / timeout and caused
+          # 16-minute apt retries before any driver compilation could start.
+          sudo sed -i 's|mirror+file:/etc/apt/apt-mirrors.txt|http://archive.ubuntu.com/ubuntu|g; s|http://azure.archive.ubuntu.com/ubuntu|http://archive.ubuntu.com/ubuntu|g' /etc/apt/sources.list.d/ubuntu.sources
+          sudo apt-get update -o Acquire::Retries=1 -o Acquire::http::Timeout=20 -o APT::Update::Error-Mode=any
+          sudo apt-get install -y --no-install-recommends -o Acquire::Retries=1 -o Acquire::http::Timeout=20 \
             build-essential git cmake pkg-config ninja-build glslang-tools \
             llvm-18-dev clang-18 libclang-18-dev libclc-18-dev \
             libllvmspirvlib-18-dev spirv-tools python3-venv python3-pip \
