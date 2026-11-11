@@ -1,0 +1,32 @@
+name: Inspect offline builder tooling
+on:
+  push:
+    branches: [harmony42-atom72-test]
+    paths: ['.github/workflows/offline-tooling.yml']
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  inspect:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 2
+    steps:
+      - name: Inspect installed toolchain without downloads
+        shell: bash
+        run: |
+          set -u
+          for bin in meson ninja cmake clang clang-18 llvm-config llvm-config-18 glslangValidator sdkmanager python3 pip pip3 zip; do
+            echo "TOOL ${bin}: $(command -v "$bin" || echo MISSING)"
+          done
+          python3 - <<'PY'
+          import importlib.util
+          for p in ('mesonbuild','mako','yaml','packaging'):
+              print('PYTHON',p,'present' if importlib.util.find_spec(p) else 'MISSING')
+          PY
+          for pkg in llvm-18-dev clang-18 libclang-18-dev libclc-18-dev libllvmspirvlib-18-dev spirv-tools glslang-tools ninja-build; do
+            echo "PKG $pkg: $(dpkg-query -W -f='${Status}' "$pkg" 2>/dev/null || echo MISSING)"
+          done
+          find "${ANDROID_HOME:-/usr/local/lib/android/sdk}/ndk" -maxdepth 2 -type d -name '29.*' 2>/dev/null || :
+          echo "DNS ubuntu: $(timeout 3 getent hosts archive.ubuntu.com || echo unavailable)"
