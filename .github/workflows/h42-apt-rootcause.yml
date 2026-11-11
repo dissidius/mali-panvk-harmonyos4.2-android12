@@ -1,0 +1,48 @@
+name: H42 pinpoint APT root cause
+on:
+  push:
+    branches: [harmony42-atom72-test]
+    paths: ['.github/workflows/h42-apt-rootcause.yml']
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  diagnose:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 3
+    steps:
+      - name: Check package indexes, architecture and candidate resolution (no install)
+        run: |
+          set -euxo pipefail
+          echo "=== sources ==="
+          cat /etc/apt/sources.list.d/ubuntu.sources | grep -E '^(Types|URIs|Suites|Components|Signed-By):'
+          echo "=== existing package priorities ==="
+          apt-cache policy | head -50 || :
+          echo "=== apt preferences ==="
+          sudo sh -c 'find /etc/apt/preferences* -type f -maxdepth 3 -exec sh -c "echo ==={}; head -40 {}" \;' || :
+          echo "=== apt config ==="
+          apt-config dump | grep -E 'Dir::Etc|Dir::State|APT::Architecture|APT::Default-Release|APT::Get|Acquire::IndexTargets|Binary::apt' | head -50 || :
+          echo "=== write isolated minimal Ubuntu source ==="
+          sudo mkdir -p /tmp/h42apt/lists/partial /tmp/h42apt/archives/partial
+          sudo mkdir -p /tmp/h42apt/sources.list.d
+          echo 'deb [signed-by=/usr/share/keyrings/ubuntu-archive-keyring.gpg] http://mirrors.mit.edu/ubuntu noble main' | sudo tee /tmp/h42apt/source.list
+          timeout 65s sudo apt-get -o Dir::Etc::sourcelist=/tmp/h42apt/source.list \
+            -o Dir::Etc::sourceparts=/tmp/h42apt/sources.list.d \
+            -o Dir::State::lists=/tmp/h42apt/lists -o Dir::Cache::archives=/tmp/h42apt/archives \
+            -o Acquire::Languages=none -o Acquire::Retries=0 -o APT::Update::Error-Mode=any update
+          echo "=== isolated package policy ==="
+          sudo apt-cache -o Dir::Etc::sourcelist=/tmp/h42apt/source.list \
+            -o Dir::Etc::sourceparts=/tmp/h42apt/sources.list.d \
+            -o Dir::State::lists=/tmp/h42apt/lists policy build-essential
+          echo "=== candidate from main package index ==="
+          sudo apt-cache -o Dir::Etc::sourcelist=/tmp/h42apt/source.list \
+            -o Dir::Etc::sourceparts=/tmp/h42apt/sources.list.d \
+            -o Dir::State::lists=/tmp/h42apt/lists show build-essential | head -16 || :
+          echo "=== candidate after cache generation ==="
+          sudo apt-cache -o Dir::Etc::sourcelist=/tmp/h42apt/source.list \
+            -o Dir::Etc::sourceparts=/tmp/h42apt/sources.list.d \
+            -o Dir::State::lists=/tmp/h42apt/lists gencaches
+          sudo apt-cache -o Dir::Etc::sourcelist=/tmp/h42apt/source.list \
+            -o Dir::Etc::sourceparts=/tmp/h42apt/sources.list.d \
+            -o Dir::State::lists=/tmp/h42apt/lists policy build-essential
+          ls -lh /tmp/h42apt/lists/
