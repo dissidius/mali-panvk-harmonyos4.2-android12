@@ -29,6 +29,13 @@ jobs:
             echo "PKG $pkg: $(dpkg-query -W -f='${Status}' "$pkg" 2>/dev/null || echo MISSING)"
           done
           find "${ANDROID_HOME:-/usr/local/lib/android/sdk}/ndk" -maxdepth 2 -type d -name '29.*' 2>/dev/null || :
+          for url in \
+            https://mirrors.mit.edu/ubuntu/dists/noble/InRelease \
+            https://mirrors.mit.edu/ubuntu/dists/noble-security/InRelease \
+            https://mirrors.edge.kernel.org/ubuntu/dists/noble/InRelease; do
+            code=$(curl -L -I -s --max-time 8 -o /dev/null -w '%{http_code}' "$url" || true)
+            echo "MIRROR $url HTTP=$code"
+          done
           for host in archive.ubuntu.com security.ubuntu.com mirrors.edge.kernel.org mirrors.mit.edu pypi.org gitlab.freedesktop.org github.com; do
             if timeout 3s getent hosts "$host" >/dev/null; then
               echo "DNS $host: RESOLVES"
