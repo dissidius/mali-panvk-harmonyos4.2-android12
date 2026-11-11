@@ -1,0 +1,25 @@
+# Shared *host-tools* image for experimental PanVK on Android/HarmonyOS.
+# The Android NDK is intentionally NOT bundled: workflows reuse the exact r29
+# toolchain already present on the GitHub-hosted Ubuntu runner via a bind mount.
+FROM ubuntu:24.04
+ENV DEBIAN_FRONTEND=noninteractive
+RUN sed -i \
+      -e 's|http://archive.ubuntu.com/ubuntu|https://mirrors.mit.edu/ubuntu|g' \
+      -e 's|http://security.ubuntu.com/ubuntu|https://mirrors.mit.edu/ubuntu|g' \
+      /etc/apt/sources.list.d/ubuntu.sources \
+ && apt-get update -o Acquire::Languages=none -o APT::Update::Error-Mode=any \
+ && apt-get install -y --no-install-recommends \
+      build-essential git cmake pkg-config ninja-build glslang-tools \
+      llvm-18-dev clang-18 libclang-18-dev libclc-18-dev \
+      libllvmspirvlib-18-dev spirv-tools python3 python3-venv python3-pip \
+      libdrm-dev libx11-dev libx11-xcb-dev libxcb1-dev libxcb-dri3-dev \
+      libxcb-present-dev libxcb-shm0-dev libxcb-sync-dev libxcb-xfixes0-dev \
+      libxrandr-dev libxshmfence-dev zip ccache ca-certificates \
+ && python3 -m venv /opt/h42-venv \
+ && /opt/h42-venv/bin/pip install --no-cache-dir \
+      'meson>=1.7,<2' mako packaging pyyaml ply \
+ && rm -rf /var/lib/apt/lists/*
+ENV PATH="/opt/h42-venv/bin:/usr/lib/llvm-18/bin:${PATH}"
+ENV CCACHE_COMPILERCHECK=content CCACHE_NOHASHDIR=true
+WORKDIR /workspace
+CMD ["/bin/bash"]
