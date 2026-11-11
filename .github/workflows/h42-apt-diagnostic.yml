@@ -1,0 +1,38 @@
+name: Diagnose Ubuntu package indexes on H42 runner
+on:
+  push:
+    branches: [harmony42-atom72-test]
+    paths: [.github/workflows/h42-apt-diagnostic.yml]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  apt-index:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 4
+    steps:
+      - uses: actions/checkout@v4
+      - name: Compare default and custom apt index resolution
+        shell: bash
+        run: |
+          set -u
+          sudo sed -i 's|mirror+file:/etc/apt/apt-mirrors.txt|https://mirrors.mit.edu/ubuntu|g; s|http://azure.archive.ubuntu.com/ubuntu|https://mirrors.mit.edu/ubuntu|g; s|http://archive.ubuntu.com/ubuntu|https://mirrors.mit.edu/ubuntu|g; s|https://security.ubuntu.com/ubuntu|https://mirrors.mit.edu/ubuntu|g' /etc/apt/sources.list.d/ubuntu.sources
+          echo "=== Distribution ==="; cat /etc/os-release | head -n 5
+          echo "=== APT sources ==="; cat /etc/apt/sources.list.d/ubuntu.sources
+          echo "=== APT config ==="; apt-config dump | grep -E 'Dir::State|APT::Default-Release|APT::Architecture' | head -n 30 || :
+          echo "=== Default apt list candidate before refresh ==="; apt-cache policy build-essential | head -n 12
+          mkdir -p .ci-apt/lists/partial .ci-apt/archives/partial
+          timeout 100s sudo apt-get -o Acquire::Languages=none -o Acquire::Retries=0 -o Acquire::https::Timeout=12 -o APT::Update::Error-Mode=any update
+          echo "=== Default apt list candidate after refresh ==="; apt-cache policy build-essential | head -n 12
+          echo "=== Ubuntu package index size and first lines ==="
+          find /var/lib/apt/lists -maxdepth 1 -iname '*main*amd64*Packages*' -printf '%p %s bytes\n' | head -n 12
+          target="$(find /var/lib/apt/lists -maxdepth 1 -iname '*noble_main_binary-amd64_Packages*' | head -n1)"
+          if [ -n "$target" ]; then
+            echo "INDEX $target"
+            file "$target"
+            head -c 240 "$target" | cat -v
+            echo
+            grep -a -m1 'Package: build-essential' "$target" || :
+          fi
