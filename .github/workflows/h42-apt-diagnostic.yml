@@ -36,3 +36,11 @@ jobs:
             echo
             grep -a -m1 'Package: build-essential' "$target" || :
           fi
+          echo '=== APT policy for all sources ==='
+          apt-cache policy | head -n 60 || :
+          echo '=== APT preferences ==='
+          find /etc/apt/preferences.d -type f -maxdepth 1 -print -exec head -n 25 {} \; || :
+          echo '=== Generate caches explicitly ==='
+          sudo apt-cache gencaches || :
+          apt-cache policy build-essential | head -n 20 || :
+          apt-cache show build-essential | head -n 15 || :
