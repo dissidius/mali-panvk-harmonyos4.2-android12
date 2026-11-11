@@ -29,4 +29,10 @@ jobs:
             echo "PKG $pkg: $(dpkg-query -W -f='${Status}' "$pkg" 2>/dev/null || echo MISSING)"
           done
           find "${ANDROID_HOME:-/usr/local/lib/android/sdk}/ndk" -maxdepth 2 -type d -name '29.*' 2>/dev/null || :
-          echo "DNS ubuntu: $(timeout 3 getent hosts archive.ubuntu.com || echo unavailable)"
+          for host in archive.ubuntu.com security.ubuntu.com mirrors.edge.kernel.org mirrors.mit.edu pypi.org gitlab.freedesktop.org github.com; do
+            if timeout 3s getent hosts "$host" >/dev/null; then
+              echo "DNS $host: RESOLVES"
+            else
+              echo "DNS $host: UNAVAILABLE"
+            fi
+          done
