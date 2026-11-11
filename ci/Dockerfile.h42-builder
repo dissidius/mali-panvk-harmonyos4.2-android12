@@ -4,8 +4,8 @@
 FROM ubuntu:24.04
 ENV DEBIAN_FRONTEND=noninteractive
 RUN sed -i \
-      -e 's|http://archive.ubuntu.com/ubuntu|https://mirrors.mit.edu/ubuntu|g' \
-      -e 's|http://security.ubuntu.com/ubuntu|https://mirrors.mit.edu/ubuntu|g' \
+      -e 's|http://archive.ubuntu.com/ubuntu|http://mirrors.mit.edu/ubuntu|g' \
+      -e 's|http://security.ubuntu.com/ubuntu|http://mirrors.mit.edu/ubuntu|g' \
       /etc/apt/sources.list.d/ubuntu.sources \
  && apt-get update -o Acquire::Languages=none -o APT::Update::Error-Mode=any \
  && apt-get install -y --no-install-recommends \
