@@ -4,6 +4,7 @@ on:
     paths:
       - 'src/panfrost/lib/kmod/kbase_kmod.c'
       - '.github/workflows/huawei-android.yml'
+      - 'ci/**'
   workflow_dispatch:
 
 concurrency:
@@ -12,6 +13,7 @@ concurrency:
 
 permissions:
   contents: read
+  packages: read
 
 jobs:
   android:
@@ -19,7 +21,14 @@ jobs:
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
+      - name: Probe published reusable H42 builder image
+        id: builder
+        continue-on-error: true
+        run: |
+          echo "${{ secrets.GITHUB_TOKEN }}" | docker login ghcr.io -u "${{ github.actor }}" --password-stdin
+          docker pull ghcr.io/dissidius/panvk-h42-builder:llvm18-v1
       - name: Restore Ubuntu and Python dependency cache
+        if: steps.builder.outcome != 'success'
         id: deps
         uses: actions/cache/restore@v4
         with:
@@ -35,17 +44,24 @@ jobs:
           restore-keys: |
             h42-ccache-v1-${{ runner.os }}-
       - name: Reuse cached tools, install only missing dependencies
+        if: steps.builder.outcome != 'success'
         timeout-minutes: 7
         run: bash ci/h42-setup.sh
       - name: Save prepared dependency cache
-        if: success() && steps.deps.outputs.cache-hit != 'true'
+        if: success() && steps.builder.outcome != 'success' && steps.deps.outputs.cache-hit != 'true'
         uses: actions/cache/save@v4
         with:
           path: |
             .ci-apt
             .ci-venv
           key: h42-deps-v2-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('ci/h42-apt.txt', 'ci/h42-python.txt') }}
+      - name: Build with reusable prebuilt toolchain (NDK from runner)
+        if: steps.builder.outcome == 'success'
+        timeout-minutes: 20
+        run: |
+          bash ci/h42-in-container.sh bash -c './build.sh "$ANDROID_HOME/ndk/29.0.14206865" && ls -lah dist'
       - name: Build Android arm64 Vulkan driver and ZIP
+        if: steps.builder.outcome != 'success'
         env:
           CC: clang-18
           CXX: clang++-18
