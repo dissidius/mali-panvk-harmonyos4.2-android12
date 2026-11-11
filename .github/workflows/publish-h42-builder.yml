@@ -1,0 +1,57 @@
+name: Publish reusable H42 Mesa build image
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [harmony42-atom72-test]
+    paths:
+      - 'ci/Dockerfile.h42-builder'
+      - '.github/workflows/publish-h42-builder.yml'
+
+permissions:
+  contents: read
+  packages: write
+
+concurrency:
+  group: publish-h42-builder
+  cancel-in-progress: true
+
+jobs:
+  build-and-publish:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    steps:
+      - name: Checkout builder definition
+        uses: actions/checkout@v4
+      - name: Set up Buildx
+        uses: docker/setup-buildx-action@v3
+      - name: Authenticate to GitHub Container Registry
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Build and publish reusable image with layer caching
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: ci/Dockerfile.h42-builder
+          push: true
+          tags: ghcr.io/dissidius/panvk-h42-builder:llvm18-v1
+          cache-from: type=gha,scope=panvk-h42-builder-v1
+          cache-to: type=gha,scope=panvk-h42-builder-v1,mode=max
+      - name: Verify published image contains build tools
+        run: |
+          set -euo pipefail
+          docker run --rm ghcr.io/dissidius/panvk-h42-builder:llvm18-v1 bash -lc '
+            set -e
+            meson --version
+            ninja --version
+            clang-18 --version | head -n 1
+            llvm-config-18 --version
+            glslangValidator --version | head -n 1
+            ccache --version | head -n 1
+            python3 -c "import mako, yaml, packaging, ply"
+            test -f /usr/lib/llvm-18/lib/libclang.so ||
+              test -f /usr/lib/llvm-18/lib/libclang-cpp.so.18
+          '
