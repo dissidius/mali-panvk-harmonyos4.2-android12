@@ -6,23 +6,29 @@ on:
       - '.github/workflows/huawei-android.yml'
   workflow_dispatch:
 
+concurrency:
+  group: huawei-atom72-${{ github.ref }}
+  cancel-in-progress: true
+
 permissions:
   contents: read
 
 jobs:
   android:
     runs-on: ubuntu-24.04
-    timeout-minutes: 120
+    timeout-minutes: 12
     steps:
       - uses: actions/checkout@v4
-      - name: Install Linux host dependencies
+      - name: Install Linux host dependencies (fast-fail on network outage)
+        timeout-minutes: 3
         run: |
           # Prefer upstream Ubuntu mirrors over the runner's Azure mirror.
           # Azure DNS returned intermittent NXDOMAIN / timeout and caused
           # 16-minute apt retries before any driver compilation could start.
           sudo sed -i 's|mirror+file:/etc/apt/apt-mirrors.txt|http://archive.ubuntu.com/ubuntu|g; s|http://azure.archive.ubuntu.com/ubuntu|http://archive.ubuntu.com/ubuntu|g' /etc/apt/sources.list.d/ubuntu.sources
-          sudo apt-get update -o Acquire::Retries=1 -o Acquire::http::Timeout=20 -o APT::Update::Error-Mode=any
-          sudo apt-get install -y --no-install-recommends -o Acquire::Retries=1 -o Acquire::http::Timeout=20 \
+          timeout 8s getent hosts archive.ubuntu.com >/dev/null || { echo 'ERROR: Ubuntu mirror DNS unavailable on this GitHub runner; aborting immediately.' >&2; exit 2; }
+          timeout 45s sudo apt-get update -o Acquire::Retries=0 -o Acquire::http::Timeout=8 -o APT::Update::Error-Mode=any
+          timeout 100s sudo apt-get install -y --no-install-recommends -o Acquire::Retries=0 -o Acquire::http::Timeout=8 \
             build-essential git cmake pkg-config ninja-build glslang-tools \
             llvm-18-dev clang-18 libclang-18-dev libclc-18-dev \
             libllvmspirvlib-18-dev spirv-tools python3-venv python3-pip \
