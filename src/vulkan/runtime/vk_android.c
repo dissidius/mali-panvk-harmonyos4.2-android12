@@ -502,6 +502,14 @@ vk_android_gralloc_linear(void)
    if (v < 0) {
       char p[PROP_VALUE_MAX] = {0};
       int on = __system_property_get("ro.hardware.vulkan", p) > 0 && !strcmp(p, "samsung");
+      /* H42 Kirin990: vendor gralloc returned an AFBC buffer (12,333,056
+       * bytes at 1200x2486, including a 0x2f000 header) despite the
+       * PanVK importer treating it as linear. Reuse the already existing
+       * gralloc CPU-usage flag path; do NOT guess AFBC compression flags. */
+      const bool kirin990 = __system_property_get("ro.hardware", p) > 0 &&
+                            !strcmp(p, "kirin990");
+      if (kirin990)
+         on = 1;
       const char *e = getenv("MESA_GRALLOC_LINEAR");
       if (e && e[0])
          on = e[0] != '0';
@@ -510,6 +518,8 @@ vk_android_gralloc_linear(void)
       v = on;
       if (on && u_xclipse_log_on())
          mesa_logi("Samsung gralloc: swapchain and exported buffers get CPU usage (linear layout)");
+      if (kirin990)
+         mesa_logw("H42FIX Kirin990 gralloc linear=%d (MESA_GRALLOC_LINEAR / debug.mesa_gralloc_linear may override)", on);
    }
    return v;
 }
