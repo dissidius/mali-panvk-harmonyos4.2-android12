@@ -1,0 +1,125 @@
+name: H42 JimVulkan MEM_IMPORT32-only ARM64 control (no Atom72)
+on:
+  push:
+    branches: [harmony42-memimport32-only-control]
+    paths:
+      - '.github/workflows/h42-memimport32-only.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  packages: read
+
+concurrency:
+  group: h42-jimvulkan-mem32-control-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  android:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Assert only 32-byte MEM_IMPORT fallback, original atom handling
+        shell: bash
+        run: |
+          set -euo pipefail
+          grep -Fq 'KBASE_IOCTL_MEM_IMPORT_32' src/panfrost/lib/kmod/kbase_kmod.c
+          grep -Fq 'kbase_dev->mem_import_size = 32;' src/panfrost/lib/kmod/kbase_kmod.c
+          if grep -Eq 'KBASE_ATOM_SEQ_NR_72|KBASE_ATOM_STRIDE_H42|PANVK_H42_ATOM72|kbase_probe_huawei_atom72' src/panfrost/lib/kmod/kbase_kmod.c; then
+            echo 'ERROR: Atom72 code detected, this is not a valid MEM_IMPORT32-only baseline' >&2
+            exit 1
+          fi
+          echo "Control verified: 32-byte MEM_IMPORT fallback present; Atom72 absent"
+          git rev-parse HEAD
+
+      - name: Authenticate and pull published H42 toolchain
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          printf '%s' "$GH_TOKEN" | docker login ghcr.io -u "${{ github.actor }}" --password-stdin
+          docker pull ghcr.io/dissidius/panvk-h42-builder:llvm18-v1
+
+      - name: Restore incremental compiler cache
+        uses: actions/cache/restore@v4
+        with:
+          path: .ci-ccache
+          key: h42-mem32-ccache-v1-${{ runner.os }}-${{ github.run_id }}-${{ github.run_attempt }}
+          restore-keys: |
+            h42-mem32-ccache-v1-${{ runner.os }}-
+
+      - name: Build pristine MEM_IMPORT32-only driver with existing image
+        timeout-minutes: 20
+        run: |
+          set -euo pipefail
+          bash ci/h42-in-container.sh bash -c './build.sh "$ANDROID_HOME/ndk/29.0.14206865" && ls -lah dist'
+
+      - name: Repackage original driver ZIP for ARMSX2 only
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import json
+          import os
+          from pathlib import Path
+          import zipfile
+
+          dist = Path("dist")
+          originals = sorted(dist.glob("*.zip"))
+          if len(originals) != 1:
+              raise SystemExit(f"expected exactly one upstream ZIP, got: {originals}")
+          original = originals[0]
+          target = dist / "JimVulkan-H42-MEM_IMPORT32-only-NO-ATOM72-ARMSX2.zip"
+          with zipfile.ZipFile(original) as src:
+              names = set(src.namelist())
+              if not {"meta.json", "libvulkan_panfrost.so"}.issubset(names):
+                  raise SystemExit(f"unexpected upstream ZIP members: {sorted(names)}")
+              meta = json.loads(src.read("meta.json"))
+              blob = src.read("libvulkan_panfrost.so")
+              if not blob.startswith(b"\x7fELF"):
+                  raise SystemExit("the Vulkan driver is not an ELF binary")
+              meta["name"] = "JimVulkan H42 MEM_IMPORT32 ONLY (NO Atom72)"
+              meta["description"] = "Experimental control: unmodified JM atom layout and 32-byte kbase MEM_IMPORT fallback."
+              meta["libraryName"] = "libvulkan_freedreno.so"
+              with zipfile.ZipFile(target, "w", compression=zipfile.ZIP_DEFLATED, compresslevel=6) as dst:
+                  dst.writestr("meta.json", json.dumps(meta, indent=2) + "\n")
+                  dst.writestr("libvulkan_freedreno.so", blob)
+                  for member in sorted(names - {"meta.json", "libvulkan_panfrost.so"}):
+                      if not member.endswith("/"):
+                          dst.writestr(member, src.read(member))
+          with zipfile.ZipFile(target) as z:
+              assert z.getinfo("libvulkan_freedreno.so").file_size > 100000
+              assert json.loads(z.read("meta.json"))["libraryName"] == "libvulkan_freedreno.so"
+          import hashlib
+          for path in [original, target]:
+              print(path, path.stat().st_size, hashlib.sha256(path.read_bytes()).hexdigest())
+          print("ARMSX2 ZIP uses byte-for-byte identical ELF to original ZIP")
+          PY
+
+      - name: Save compiler cache
+        if: always()
+        uses: actions/cache/save@v4
+        with:
+          path: .ci-ccache
+          key: h42-mem32-ccache-v1-${{ runner.os }}-${{ github.run_id }}-${{ github.run_attempt }}
+
+      - name: Upload pristine and ARMSX2-ready ZIPs
+        uses: actions/upload-artifact@v4
+        with:
+          name: JimVulkan-H42-MEM_IMPORT32-only-NO-ATOM72
+          path: dist/*.zip
+          if-no-files-found: error
+          retention-days: 14
+
+      - name: Upload Meson logs if build fails
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: JimVulkan-MEM_IMPORT32-only-build-logs
+          path: |
+            build-host/meson-logs/
+            build-android/meson-logs/
+          if-no-files-found: ignore
+          retention-days: 7
