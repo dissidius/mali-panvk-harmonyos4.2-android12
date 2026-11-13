@@ -21,6 +21,7 @@
 #include <errno.h>
 #include <inttypes.h>
 #include <string.h>
+#include <sys/stat.h>
 
 struct fallback_gralloc {
    struct u_gralloc base;
@@ -314,6 +315,39 @@ arm_gralloc_get_buffer_info(struct u_gralloc_buffer_handle *hnd,
       }
    }
    if (plane0 < 0) {
+      /*
+       * H42DIAG: Never reinterpret or change the native handle. Record only
+       * the first few unmatched handles, DMA-BUF sizes, and each known
+       * candidate layout's dimensions/stride for offline analysis.
+       */
+      static unsigned h42_unknown_handles;
+      const unsigned h42_n = __atomic_add_fetch(&h42_unknown_handles, 1, __ATOMIC_RELAXED);
+      if (h42_n <= 4) {
+         mesa_logw("H42DIAG gralloc unknown #%u: fds=%d ints=%d magic_at=%d "
+                   "request_fmt=0x%x request_pixel_stride=%d",
+                   h42_n, handle->numFds, handle->numInts, m,
+                   hnd->hal_format, hnd->pixel_stride);
+         for (int i = 0; i < handle->numFds && i < 4; i++) {
+            struct stat st = {0};
+            const int fd = handle->data[i];
+            const int stat_result = fd >= 0 ? fstat(fd, &st) : -1;
+            mesa_logw("H42DIAG gralloc fd[%d]=%d stat_ok=%d size=%lld",
+                      i, fd, stat_result == 0,
+                      stat_result == 0 ? (long long)st.st_size : -1LL);
+         }
+         for (unsigned i = 0; i < ARRAY_SIZE(arm_hnd_layouts); i++) {
+            const struct arm_hnd_layout *candidate = &arm_hnd_layouts[i];
+            if (m + candidate->plane0 + 2 >= total ||
+                m + candidate->req_format >= total ||
+                m + candidate->height >= total)
+               continue;
+            mesa_logw("H42DIAG gralloc candidate[%u]: fmt=0x%x size=%dx%d "
+                      "plane0_stride=%d plane0_dims=%dx%d",
+                      i, h[candidate->req_format], h[candidate->width],
+                      h[candidate->height], h[candidate->plane0],
+                      h[candidate->plane0 + 1], h[candidate->plane0 + 2]);
+         }
+      }
       /* An ARM handle of a layout not measured here (another allocator version: a Helio G90's
        * Mali-G76 did not match either). Refusing it made every AHardwareBuffer import fail, and
        * with it the swapchain of every Winlator-style wrapper. Take the buffer as linear, with
@@ -343,6 +377,20 @@ arm_gralloc_get_buffer_info(struct u_gralloc_buffer_handle *hnd,
       out->fds[0] = req_fd;
       out->offsets[0] = 0;
       out->strides[0] = hnd->pixel_stride * req_bpp;
+      if (h42_n <= 4) {
+         struct stat st = {0};
+         const int stat_result = fstat(req_fd, &st);
+         const uint64_t minimum_bytes = (uint64_t)out->strides[0] *
+                                        (uint64_t)(hnd->pixel_stride > 0 ? 1 : 0);
+         mesa_logw("H42DIAG gralloc chosen: fd=%d stat_ok=%d size=%lld "
+                   "fourcc=0x%x modifier=0x%llx offset=%u byte_stride=%u "
+                   "minimum_one_row_bytes=%llu",
+                   req_fd, stat_result == 0,
+                   stat_result == 0 ? (long long)st.st_size : -1LL,
+                   (unsigned)out->drm_fourcc, (unsigned long long)out->modifier,
+                   (unsigned)out->offsets[0], (unsigned)out->strides[0],
+                   (unsigned long long)minimum_bytes);
+      }
       return 0;
    }
    const uint32_t stride = h[plane0];
