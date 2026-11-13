@@ -4,6 +4,7 @@ on:
     branches: [harmony42-memimport32-only-control]
     paths:
       - '.github/workflows/h42-memimport32-only.yml'
+      - 'ci/h42-in-container.sh'
   workflow_dispatch:
 
 permissions:
