@@ -391,6 +391,57 @@ arm_gralloc_get_buffer_info(struct u_gralloc_buffer_handle *hnd,
                    (unsigned)out->offsets[0], (unsigned)out->strides[0],
                    (unsigned long long)minimum_bytes);
       }
+
+      /*
+       * H42TEST: isolated, strictly measured Kirin 990/HarmonyOS 4.2
+       * ARM-gralloc AFBC 16x16 sparse import experiment.
+       *
+       * Only select AFBC if this exact 2-fd/81-int native-handle
+       * layout exposes matching dimensions, padded stride, and
+       * a 4K-aligned 16x16 AFBC header whose size plus the sparse
+       * payload exactly equals the backing dma-buf allocation.
+       *
+       * Unlike the previous linear fallback, AFBC has a header
+       * at offset zero followed by the compressed/sparse body.
+       * No other device or buffer is affected.
+       */
+      if (handle->numFds == 2 && handle->numInts == 81 &&
+          m == handle->numFds && hnd->hal_format == HAL_PIXEL_FORMAT_RGBA_8888 &&
+          h[6] > 0 && h[6] <= 8192 && h[30] > 0 && h[30] <= 8192 &&
+          h[29] > 0 && h[29] <= h[6] && h[7] == 4 &&
+          h[5] == h[6] * 4 && h[41] == h[6] &&
+          req_fd == handle->data[0]) {
+         const uint64_t w16 = ((uint64_t)(uint32_t)h[6] + 15) / 16;
+         const uint64_t h16 = ((uint64_t)(uint32_t)h[30] + 15) / 16;
+         const uint64_t header_bytes = ((w16 * h16 * 16 + 4095) / 4096) * 4096;
+         const uint64_t padded_h = h16 * 16;
+         const uint64_t expected_bytes = header_bytes +
+                                        (uint64_t)(uint32_t)h[5] * padded_h;
+         struct stat h42_stat = {0};
+         const bool stat_ok = fstat(req_fd, &h42_stat) == 0;
+         if (stat_ok && h42_stat.st_size > 0 &&
+             (uint64_t)h42_stat.st_size == expected_bytes &&
+             (uint64_t)(uint32_t)h[8] == expected_bytes &&
+             (uint64_t)(uint32_t)h[38] == expected_bytes &&
+             (uint64_t)(uint32_t)h[43] == header_bytes &&
+             ((uint32_t)h[42] - (uint32_t)h[37]) == header_bytes) {
+            out->modifier = DRM_FORMAT_MOD_ARM_AFBC(
+               AFBC_FORMAT_MOD_BLOCK_SIZE_16x16 | AFBC_FORMAT_MOD_SPARSE);
+            out->alloc_size = (uint64_t)h42_stat.st_size;
+            static unsigned h42_afbc_hits;
+            const unsigned n = __atomic_add_fetch(&h42_afbc_hits, 1, __ATOMIC_RELAXED);
+            if (n <= 12)
+               mesa_logw("H42TEST Huawei AFBC16x16 sparse matched #%u: %dx%d "
+                         "padded=%llux%llu fd=%d size=%llu header=%llu "
+                         "modifier=0x%llx stride=%u",
+                         n, h[29], h[30], (unsigned long long)h[6],
+                         (unsigned long long)padded_h, req_fd,
+                         (unsigned long long)expected_bytes,
+                         (unsigned long long)header_bytes,
+                         (unsigned long long)out->modifier,
+                         (unsigned)out->strides[0]);
+         }
+      }
       return 0;
    }
    const uint32_t stride = h[plane0];
