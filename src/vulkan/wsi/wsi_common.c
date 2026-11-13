@@ -25,6 +25,7 @@
 #include "wsi_common_entrypoints.h"
 #include "util/u_debug.h"
 #include "util/macros.h"
+#include "util/log.h"
 #include "util/os_file.h"
 #include "util/os_time.h"
 #include "util/xmlconfig.h"
@@ -1561,6 +1562,12 @@ wsi_CreateSwapchainKHR(VkDevice _device,
    VkResult result = iface->create_swapchain(surface, _device, wsi_device,
                                              &info, alloc,
                                              &swapchain);
+   /* H42DIAG: report every swapchain creation/recreation. */
+   mesa_logw("H42DIAG WSI create_swapchain: result=%d extent=%ux%u fmt=%d "
+             "mode=%d transform=0x%x minImages=%u",
+             (int)result, info.imageExtent.width, info.imageExtent.height,
+             (int)info.imageFormat, (int)info.presentMode,
+             (unsigned)info.preTransform, info.minImageCount);
    if (result != VK_SUCCESS)
       return result;
 
@@ -2418,8 +2425,19 @@ wsi_AcquireNextImage2KHR(VkDevice _device,
    MESA_TRACE_FUNC();
    VK_FROM_HANDLE(vk_device, device, _device);
 
-   return wsi_common_acquire_next_image2(device->physical->wsi_device,
-                                         _device, pAcquireInfo, pImageIndex);
+   VkResult h42_result = wsi_common_acquire_next_image2(device->physical->wsi_device,
+                                                         _device, pAcquireInfo, pImageIndex);
+   static unsigned h42_acquire_count;
+   const unsigned h42_n = __atomic_add_fetch(&h42_acquire_count, 1, __ATOMIC_RELAXED);
+   if (h42_n <= 24 || (h42_n % 240) == 0 ||
+       (h42_result != VK_SUCCESS && h42_result != VK_SUBOPTIMAL_KHR)) {
+      mesa_logw("H42DIAG WSI acquire #%u: result=%d image=%u timeout=%llu",
+                h42_n, (int)h42_result,
+                (h42_result == VK_SUCCESS || h42_result == VK_SUBOPTIMAL_KHR)
+                   ? *pImageIndex : UINT32_MAX,
+                (unsigned long long)pAcquireInfo->timeout);
+   }
+   return h42_result;
 }
 
 static VkResult
@@ -3029,8 +3047,19 @@ wsi_QueuePresentKHR(VkQueue _queue, const VkPresentInfoKHR *pPresentInfo)
    /* Perf accounting frame boundary. Off by default; see vk_xclipse_perf.h. */
    vk_xclipse_perf_present();
 
-   return wsi_common_queue_present(queue->base.device->physical->wsi_device,
-                                   queue, pPresentInfo);
+   VkResult h42_result = wsi_common_queue_present(queue->base.device->physical->wsi_device,
+                                                     queue, pPresentInfo);
+   static unsigned h42_present_count;
+   const unsigned h42_n = __atomic_add_fetch(&h42_present_count, 1, __ATOMIC_RELAXED);
+   if (h42_n <= 24 || (h42_n % 240) == 0 ||
+       (h42_result != VK_SUCCESS && h42_result != VK_SUBOPTIMAL_KHR)) {
+      mesa_logw("H42DIAG WSI present #%u: result=%d swapchains=%u image0=%u waitSemaphores=%u",
+                h42_n, (int)h42_result, pPresentInfo->swapchainCount,
+                (pPresentInfo->swapchainCount && pPresentInfo->pImageIndices)
+                   ? pPresentInfo->pImageIndices[0] : UINT32_MAX,
+                pPresentInfo->waitSemaphoreCount);
+   }
+   return h42_result;
 }
 
 VKAPI_ATTR VkResult VKAPI_CALL
