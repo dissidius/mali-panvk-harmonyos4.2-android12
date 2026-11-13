@@ -1,0 +1,120 @@
+name: JimVulkan H42 Atom72 gralloc WSI diagnostics (ARM64)
+on:
+  push:
+    branches: [harmony42-atom72-gralloc-wsi-diag]
+    paths:
+      - '.github/workflows/h42-gralloc-wsi-diag.yml'
+      - 'src/util/u_gralloc/u_gralloc_fallback.c'
+      - 'src/vulkan/wsi/wsi_common.c'
+      - 'src/panfrost/vulkan/panvk_wsi.c'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  packages: read
+
+concurrency:
+  group: h42-jimvulkan-gralloc-wsi-diag-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  android:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Verify experimental compatibility and diagnostic markers
+        shell: bash
+        run: |
+          set -euo pipefail
+          grep -Fq 'KBASE_IOCTL_MEM_IMPORT_32' src/panfrost/lib/kmod/kbase_kmod.c
+          grep -Fq 'KBASE_ATOM_STRIDE_H42 72' src/panfrost/lib/kmod/kbase_kmod.c
+          grep -Fq 'PANVK_H42_ATOM72' src/panfrost/lib/kmod/kbase_kmod.c
+          grep -Fq 'H42DIAG gralloc chosen' src/util/u_gralloc/u_gralloc_fallback.c
+          grep -Fq 'H42DIAG WSI create_swapchain' src/vulkan/wsi/wsi_common.c
+          grep -Fq 'H42DIAG WSI present' src/vulkan/wsi/wsi_common.c
+          grep -Fq 'H42DIAG PanVK WSI initialized' src/panfrost/vulkan/panvk_wsi.c
+          echo "Atom72 + MEM_IMPORT32 present; gralloc/WSI instrumentation found"
+          git rev-parse HEAD
+
+      - name: Authenticate and pull tested H42 compiler image
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          printf '%s' "$GH_TOKEN" | docker login ghcr.io -u "${{ github.actor }}" --password-stdin
+          docker pull ghcr.io/dissidius/panvk-h42-builder:llvm18-v1
+
+      - name: Restore incremental compiler cache
+        uses: actions/cache/restore@v4
+        with:
+          path: .ci-ccache
+          key: h42-ccache-v1-${{ runner.os }}-${{ github.run_id }}-${{ github.run_attempt }}
+          restore-keys: |
+            h42-ccache-v1-${{ runner.os }}-
+
+      - name: Compile diagnostic ARM64 Vulkan driver
+        timeout-minutes: 20
+        run: |
+          set -euo pipefail
+          bash ci/h42-in-container.sh bash -c './build.sh "$ANDROID_HOME/ndk/29.0.14206865" && ls -lah dist'
+
+      - name: Create isolated ARMSX2 packaging variant
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import json
+          import hashlib
+          from pathlib import Path
+          from zipfile import ZipFile, ZIP_DEFLATED
+          dist = Path("dist")
+          originals = sorted(dist.glob("*.zip"))
+          if len(originals) != 1:
+              raise SystemExit(f"expected exactly one original ZIP, found {originals}")
+          original = originals[0]
+          target = dist / "JimVulkan-H42-Atom72-Gralloc-WSI-DIAG-ARMSX2.zip"
+          with ZipFile(original) as z:
+              names = set(z.namelist())
+              if not {"meta.json", "libvulkan_panfrost.so"}.issubset(names):
+                  raise SystemExit(f"invalid build ZIP members {sorted(names)}")
+              lib = z.read("libvulkan_panfrost.so")
+              if lib[:5] != b"\x7fELF\x02" or len(lib) < 100000:
+                  raise SystemExit("Expected ARM64 ELF library")
+              metadata = json.loads(z.read("meta.json"))
+              metadata["name"] = "JimVulkan H42 Atom72 - Gralloc WSI DIAG"
+              metadata["description"] = "H42 experimental Atom72 + MEM_IMPORT32 unchanged; log-only gralloc/WSI diagnostics. Filter H42DIAG in logcat."
+              metadata["libraryName"] = "libvulkan_freedreno.so"
+              with ZipFile(target, "w", ZIP_DEFLATED, compresslevel=6) as out:
+                  out.writestr("meta.json", json.dumps(metadata, indent=2) + "\n")
+                  out.writestr("libvulkan_freedreno.so", lib)
+                  for n in sorted(names - {"meta.json", "libvulkan_panfrost.so"}):
+                      if not n.endswith("/"):
+                          out.writestr(n, z.read(n))
+          with ZipFile(target) as packed:
+              assert packed.read("libvulkan_freedreno.so") == lib
+              assert json.loads(packed.read("meta.json"))["libraryName"] == "libvulkan_freedreno.so"
+          print("Original ELF SHA256:", hashlib.sha256(lib).hexdigest())
+          print("ARMSX2 ELF SHA256:", hashlib.sha256(ZipFile(target).read("libvulkan_freedreno.so")).hexdigest())
+          print("ARMSX2 package:", target, target.stat().st_size)
+          PY
+
+      - name: Upload original and ARMSX2 packages
+        uses: actions/upload-artifact@v4
+        with:
+          name: JimVulkan-H42-Atom72-Gralloc-WSI-DIAG
+          path: dist/*.zip
+          if-no-files-found: error
+          retention-days: 14
+
+      - name: Upload build diagnostics if failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: JimVulkan-H42-Gralloc-WSI-build-logs
+          path: |
+            build-host/meson-logs/
+            build-android/meson-logs/
+          if-no-files-found: ignore
+          retention-days: 7
