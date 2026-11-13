@@ -3,7 +3,7 @@ on:
   push:
     branches: [harmony42-huawei-linear-usage-ab]
     paths:
-      - '.github/workflows/h42-huawei-afbc16-sparse-test.yml'
+      - '.github/workflows/h42-huawei-linear-usage-ab.yml'
       - 'src/util/u_gralloc/u_gralloc_fallback.c'
       - 'src/vulkan/wsi/wsi_common.c'
       - 'src/panfrost/vulkan/panvk_wsi.c'
