@@ -1,0 +1,203 @@
+name: PanVK Kirin 990 Minimal Compatibility RC1
+on:
+  push:
+    branches: [kirin990-minimal-compat-rc1]
+    paths:
+      - '.github/workflows/panvk-kirin990-compat-rc1.yml'
+      - 'src/panfrost/lib/kmod/kbase_kmod.c'
+      - 'src/panfrost/vulkan/panvk_android.c'
+      - 'src/panfrost/vulkan/panvk_android.h'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  packages: read
+
+concurrency:
+  group: panvk-kirin990-minimal-rc1-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  android:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 35
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Verify only required compatibility changes
+        shell: bash
+        run: |
+          set -euo pipefail
+          test -z "$(git diff --name-only 58f2c55854bd48b18df756edb11f187af9cd2fde HEAD -- src/ | grep -v -E '^(src/panfrost/lib/kmod/kbase_kmod.c|src/panfrost/vulkan/panvk_android.c|src/panfrost/vulkan/panvk_android.h)$')"
+          git diff --quiet 58f2c55854bd48b18df756edb11f187af9cd2fde HEAD -- src/util/u_gralloc/u_gralloc_fallback.c src/vulkan/wsi/wsi_common.c src/panfrost/vulkan/panvk_wsi.c
+          grep -Fq 'KBASE_IOCTL_MEM_IMPORT_32' src/panfrost/lib/kmod/kbase_kmod.c
+          grep -Fq 'KBASE_ATOM_STRIDE_EXTENDED' src/panfrost/lib/kmod/kbase_kmod.c
+          grep -Fq 'kbase_probe_extended_atom_layout' src/panfrost/lib/kmod/kbase_kmod.c
+          grep -Fq 'strcmp(hardware, "kirin990") == 0' src/panfrost/vulkan/panvk_android.c
+          grep -Fq 'GRALLOC_USAGE_SW_READ_RARELY' src/panfrost/vulkan/panvk_android.c
+          grep -Fq 'GRALLOC1_CONSUMER_USAGE_CPU_READ' src/panfrost/vulkan/panvk_android.c
+          if grep -En 'H42DIAG|H42TEST|H42LINEAR|H42FIX|PANVK_H42|KBASE_ATOM_STRIDE_H42' src/panfrost/lib/kmod/kbase_kmod.c src/panfrost/vulkan/panvk_android.c src/panfrost/vulkan/panvk_android.h; then
+            echo "Experimental identifiers remain" >&2
+            exit 1
+          fi
+          echo "Only three runtime source files modified; no experimental AFBC/WSI changes"
+          git rev-parse HEAD
+
+      - name: Authenticate and pull previously verified compiler image
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          printf '%s' "$GH_TOKEN" | docker login ghcr.io -u "${{ github.actor }}" --password-stdin
+          docker pull ghcr.io/dissidius/panvk-h42-builder:llvm18-v1
+
+      - name: Restore incremental compiler cache
+        uses: actions/cache/restore@v4
+        with:
+          path: .ci-ccache
+          key: panvk-compat-${{ runner.os }}-${{ github.run_id }}-${{ github.run_attempt }}
+          restore-keys: |
+            h42-ccache-v1-${{ runner.os }}-
+            panvk-compat-${{ runner.os }}-
+
+      - name: Compile upstream-based PanVK for Android 12 / ARM64
+        timeout-minutes: 25
+        shell: bash
+        run: |
+          set -euo pipefail
+          NDK="${ANDROID_HOME:-/usr/local/lib/android/sdk}/ndk/29.0.14206865"
+          test -x "$NDK/toolchains/llvm/prebuilt/linux-x86_64/bin/aarch64-linux-android31-clang"
+          mkdir -p "$GITHUB_WORKSPACE/.ci-ccache" "$GITHUB_WORKSPACE/.ci-home"
+          docker run --rm \
+            --user "$(id -u):$(id -g)" \
+            -v "$GITHUB_WORKSPACE:$GITHUB_WORKSPACE" \
+            -v "$NDK:$NDK:ro" \
+            -w "$GITHUB_WORKSPACE" \
+            -e HOME="$GITHUB_WORKSPACE/.ci-home" \
+            -e ANDROID_HOME="${ANDROID_HOME:-/usr/local/lib/android/sdk}" \
+            -e CC=clang-18 -e CXX=clang++-18 -e LLVM_CONFIG=llvm-config-18 \
+            -e CCACHE_DIR="$GITHUB_WORKSPACE/.ci-ccache" \
+            -e CCACHE_BASEDIR="$GITHUB_WORKSPACE" \
+            -e CCACHE_COMPILERCHECK=content -e CCACHE_NOHASHDIR=true \
+            ghcr.io/dissidius/panvk-h42-builder:llvm18-v1 \
+            bash -c './build.sh "$ANDROID_HOME/ndk/29.0.14206865" && ls -lah dist'
+
+      - name: Create generic and ARMSX2 packages
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          from pathlib import Path
+          from zipfile import ZipFile, ZIP_DEFLATED
+          import json, hashlib, os
+
+          dist = Path('dist')
+          originals = sorted(dist.glob('*.zip'))
+          if len(originals) != 1:
+              raise SystemExit(f'Expected 1 original ZIP, found {len(originals)}')
+          with ZipFile(originals[0]) as source:
+              names = set(source.namelist())
+              if not {'meta.json', 'libvulkan_panfrost.so'} <= names:
+                  raise SystemExit('Missing required PanVK ZIP members')
+              binary = source.read('libvulkan_panfrost.so')
+              if binary[:5] != b'\x7fELF\x02' or int.from_bytes(binary[18:20], 'little') != 183 or len(binary) < 100000:
+                  raise SystemExit('Not a valid ARM64 ELF')
+              meta = json.loads(source.read('meta.json'))
+              extras = {n: source.read(n) for n in names -
+                        {'meta.json', 'libvulkan_panfrost.so'} if not n.endswith('/')}
+
+          outdir = dist / 'release'
+          outdir.mkdir()
+          names_and_libs = [
+              ('PanVK-Kirin990-Compat-RC1-generic.zip', 'libvulkan_panfrost.so'),
+              ('PanVK-Kirin990-Compat-RC1-ARMSX2.zip', 'libvulkan_freedreno.so'),
+          ]
+          binary_sha = hashlib.sha256(binary).hexdigest()
+          checksum_lines = []
+          manifest = {
+              'source_commit': os.environ['GITHUB_SHA'],
+              'upstream_base': '58f2c55854bd48b18df756edb11f187af9cd2fde',
+              'binary_sha256': binary_sha,
+              'packages': [],
+          }
+          for filename, libname in names_and_libs:
+              metadata = dict(meta)
+              metadata['name'] = 'PanVK Kirin990 Compatibility RC1'
+              metadata['description'] = 'Upstream-based PanVK: 32-byte MEM_IMPORT, probed 72-byte JM atoms, and Kirin 990 CPU-readable gralloc. No experimental AFBC modifications. Test candidate for HarmonyOS 4.2.'
+              metadata['libraryName'] = libname
+              path = outdir / filename
+              with ZipFile(path, 'w', ZIP_DEFLATED, compresslevel=6) as z:
+                  z.writestr('meta.json', json.dumps(metadata, indent=2) + '\n')
+                  z.writestr(libname, binary)
+                  for n, content in sorted(extras.items()):
+                      z.writestr(n, content)
+              with ZipFile(path) as z:
+                  if z.read(libname) != binary:
+                      raise SystemExit('ELF identity mismatch')
+                  if json.loads(z.read('meta.json'))['libraryName'] != libname:
+                      raise SystemExit('Bad package metadata')
+              sha = hashlib.sha256(path.read_bytes()).hexdigest()
+              checksum_lines.append(f'{sha}  {filename}')
+              manifest['packages'].append({'name': filename, 'sha256': sha})
+              print(filename, path.stat().st_size, sha)
+
+          (outdir / 'SHA256SUMS.txt').write_text('\n'.join(checksum_lines) + '\n')
+          (outdir / 'MANIFEST.json').write_text(json.dumps(manifest, indent=2) + '\n')
+          print('Shared PanVK ARM64 ELF SHA256:', binary_sha)
+          PY
+
+      - name: Upload verified RC1 ZIPs
+        uses: actions/upload-artifact@v4
+        with:
+          name: PanVK-Kirin990-Minimal-Compat-RC1
+          path: dist/release/
+          if-no-files-found: error
+          retention-days: 90
+
+      - name: Publish testing prerelease
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          cat > release-notes.md <<'NOTES'
+          ### PanVK Kirin 990 Minimal Compatibility — RC1
+
+          Built from original JimVulkan/mali-panvk main commit `58f2c558` with only:
+          - A 32-byte kbase MEM_IMPORT ioctl fallback, cached per device.
+          - Automatically probed 72-byte JM atoms for Mali-G76 (existing 64-byte fallback retained).
+          - Kirin 990-only CPU-readable swapchain allocation to avoid incompatible gralloc layouts.
+
+          The experimental Huawei AFBC16x16 importer, H42 diagnostic logging, custom WSI
+          instrumentation, and test-only runtime switches are not included.
+
+          **Validation:** Compiles successfully for Android 12 ARM64 if this release exists.
+          Gameplay and rotation of this reduced build require device-side verification.
+          The previous known-working driver remains available as a rollback.
+
+          The generic ZIP contains `libvulkan_panfrost.so`; the ARMSX2 ZIP contains the
+          identical ELF renamed `libvulkan_freedreno.so` for loader compatibility.
+          See `MANIFEST.json` and `SHA256SUMS.txt` for checksums and source provenance.
+          NOTES
+          if gh release view panvk-kirin990-compat-rc1 --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            echo 'RC1 release already exists; refusing to overwrite'
+            exit 1
+          fi
+          gh release create panvk-kirin990-compat-rc1 \
+            dist/release/PanVK-Kirin990-Compat-RC1-generic.zip \
+            dist/release/PanVK-Kirin990-Compat-RC1-ARMSX2.zip \
+            dist/release/SHA256SUMS.txt dist/release/MANIFEST.json \
+            --repo "$GITHUB_REPOSITORY" --target "$GITHUB_SHA" \
+            --title 'PanVK Kirin 990 Minimal Compatibility RC1' \
+            --notes-file release-notes.md --prerelease
+
+      - name: Upload build logs on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: PanVK-Kirin990-RC1-build-logs
+          path: |
+            build-host/meson-logs/
+            build-android/meson-logs/
+          if-no-files-found: ignore
+          retention-days: 7
