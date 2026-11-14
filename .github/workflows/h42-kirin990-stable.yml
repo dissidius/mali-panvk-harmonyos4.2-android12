@@ -1,0 +1,156 @@
+name: JimVulkan H42 Kirin 990 Stable v1.0.0 ARM64
+on:
+  push:
+    branches: [harmony42-kirin990-stable-v1]
+    paths:
+      - '.github/workflows/h42-kirin990-stable.yml'
+      - 'src/panfrost/vulkan/panvk_android.c'
+      - 'src/panfrost/vulkan/panvk_android.h'
+      - 'src/util/u_gralloc/u_gralloc_fallback.c'
+      - 'src/panfrost/vulkan/panvk_wsi.c'
+      - 'src/vulkan/wsi/wsi_common.c'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  packages: read
+
+concurrency:
+  group: h42-kirin990-stable-v1-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  android:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 35
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Verify stable driver fix and absence of temporary diagnostics
+        shell: bash
+        run: |
+          set -euo pipefail
+          grep -Fq 'KBASE_IOCTL_MEM_IMPORT_32' src/panfrost/lib/kmod/kbase_kmod.c
+          grep -Fq 'KBASE_ATOM_STRIDE_H42 72' src/panfrost/lib/kmod/kbase_kmod.c
+          grep -Fq 'PANVK_H42_ATOM72' src/panfrost/lib/kmod/kbase_kmod.c
+          grep -Fq 'strcmp(hardware, "kirin990") == 0' src/panfrost/vulkan/panvk_android.c
+          grep -Fq 'GRALLOC_USAGE_SW_READ_RARELY' src/panfrost/vulkan/panvk_android.c
+          grep -Fq 'GRALLOC1_CONSUMER_USAGE_CPU_READ' src/panfrost/vulkan/panvk_android.c
+          grep -Fq 'DRM_FORMAT_MOD_ARM_AFBC(' src/util/u_gralloc/u_gralloc_fallback.c
+          grep -Fq 'handle->numFds == 2 && handle->numInts == 81' src/util/u_gralloc/u_gralloc_fallback.c
+          if grep -En 'H42DIAG|H42TEST|H42LINEAR' \
+               src/panfrost/vulkan/panvk_android.c \
+               src/util/u_gralloc/u_gralloc_fallback.c \
+               src/panfrost/vulkan/panvk_wsi.c \
+               src/vulkan/wsi/wsi_common.c; then
+             echo 'Unexpected experimental logging in stable source' >&2
+             exit 1
+          fi
+          echo 'Validated: Atom72, MEM_IMPORT32, Kirin990 CPU-read gralloc and AFBC guard'
+          git rev-parse HEAD
+
+      - name: Authenticate and pull tested H42 compiler image
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          printf '%s' "$GH_TOKEN" | docker login ghcr.io -u "${{ github.actor }}" --password-stdin
+          docker pull ghcr.io/dissidius/panvk-h42-builder:llvm18-v1
+
+      - name: Restore incremental compiler cache
+        uses: actions/cache/restore@v4
+        with:
+          path: .ci-ccache
+          key: h42-ccache-v1-${{ runner.os }}-${{ github.run_id }}-${{ github.run_attempt }}
+          restore-keys: |
+            h42-ccache-v1-${{ runner.os }}-
+
+      - name: Compile ARM64 Vulkan driver
+        timeout-minutes: 25
+        run: |
+          set -euo pipefail
+          bash ci/h42-in-container.sh bash -c './build.sh "$ANDROID_HOME/ndk/29.0.14206865" && ls -lah dist'
+
+      - name: Package generic and ARMSX2 ZIPs with identical ELF
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import hashlib
+          import json
+          from pathlib import Path
+          from zipfile import ZipFile, ZIP_DEFLATED
+
+          dist = Path('dist')
+          originals = sorted(dist.glob('*.zip'))
+          if len(originals) != 1:
+              raise SystemExit(f'Expected exactly one compiled driver ZIP, found {len(originals)}')
+          with ZipFile(originals[0]) as source:
+              names = set(source.namelist())
+              assert {'meta.json', 'libvulkan_panfrost.so'} <= names
+              binary = source.read('libvulkan_panfrost.so')
+              if len(binary) < 100000 or binary[:5] != b'\x7fELF\x02':
+                  raise SystemExit('Invalid ARM64 ELF')
+              # ELF e_machine: EM_AARCH64=183 (little endian).
+              if int.from_bytes(binary[18:20], 'little') != 183:
+                  raise SystemExit('ELF is not AArch64')
+              metadata = json.loads(source.read('meta.json'))
+              extras = {n: source.read(n) for n in names -
+                        {'meta.json', 'libvulkan_panfrost.so'} if not n.endswith('/')}
+
+          release = dist / 'release'
+          release.mkdir(exist_ok=True)
+          description = ('Kirin 990 / HarmonyOS 4.2 tested gralloc linear swapchain fix; '
+                         'Atom72 and MEM_IMPORT32 preserved. Other devices unverified.')
+          packages = [
+              ('JimVulkan-H42-Kirin990-v1.0.0-generic.zip', 'libvulkan_panfrost.so'),
+              ('JimVulkan-H42-Kirin990-v1.0.0-ARMSX2.zip', 'libvulkan_freedreno.so'),
+          ]
+          for filename, libname in packages:
+              meta = dict(metadata)
+              meta['name'] = 'JimVulkan H42 Kirin990 Stable v1.0.0'
+              meta['description'] = description
+              meta['packageVersion'] = '1.0.0'
+              meta['libraryName'] = libname
+              path = release / filename
+              with ZipFile(path, 'w', ZIP_DEFLATED, compresslevel=6) as output:
+                  output.writestr('meta.json', json.dumps(meta, indent=2) + '\n')
+                  output.writestr(libname, binary)
+                  for n, contents in sorted(extras.items()):
+                      output.writestr(n, contents)
+              with ZipFile(path) as check:
+                  assert check.read(libname) == binary
+                  assert json.loads(check.read('meta.json'))['libraryName'] == libname
+              print(filename, 'ZIP SHA256:', hashlib.sha256(path.read_bytes()).hexdigest(),
+                    'ELF SHA256:', hashlib.sha256(binary).hexdigest())
+
+          manifest = {
+              'release': 'JimVulkan H42 Kirin990 Stable v1.0.0',
+              'git_commit': '${{ github.sha }}',
+              'elf_sha256': hashlib.sha256(binary).hexdigest(),
+              'packages': [
+                  {'filename': p.name, 'sha256': hashlib.sha256(p.read_bytes()).hexdigest()}
+                  for p in sorted(release.glob('*.zip'))
+              ]
+          }
+          (release / 'SHA256SUMS.json').write_text(json.dumps(manifest, indent=2) + '\n')
+          PY
+
+      - name: Upload stable driver packages
+        uses: actions/upload-artifact@v4
+        with:
+          name: JimVulkan-H42-Kirin990-v1.0.0-stable
+          path: dist/release/
+          if-no-files-found: error
+          retention-days: 60
+
+      - name: Upload build diagnostics on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: JimVulkan-H42-Kirin990-v1.0.0-build-logs
+          path: |
+            build-host/meson-logs/
+            build-android/meson-logs/
+          if-no-files-found: ignore
+          retention-days: 7
