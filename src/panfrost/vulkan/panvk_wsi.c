@@ -61,10 +61,6 @@ panvk_wsi_init(struct panvk_physical_device *physical_device)
       panvk_can_present_on_device;
 
    physical_device->vk.wsi_device = &physical_device->wsi_device;
-   mesa_logw("H42DIAG PanVK WSI initialized: supports_modifiers=%d "
-             "sw_device=0 (no WSI behavior changed)",
-             physical_device->wsi_device.supports_modifiers);
-
    return VK_SUCCESS;
 }
 
