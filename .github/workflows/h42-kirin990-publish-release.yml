@@ -1,0 +1,90 @@
+name: Publish JimVulkan H42 Kirin990 v1.0.0 Release
+on:
+  push:
+    branches: [harmony42-kirin990-stable-v1]
+    paths:
+      - '.github/workflows/h42-kirin990-publish-release.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  actions: read
+
+concurrency:
+  group: h42-kirin990-v1.0.0-release
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 40
+    env:
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      BUILD_RUN_ID: '43622867839'
+      BUILD_SHA: '80b75c64302b349a24fa0d93d9abb01991e75fe0'
+      RELEASE_TAG: 'h42-kirin990-v1.0.0'
+    steps:
+      - uses: actions/checkout@v4
+      - name: Wait for compiled stable ZIPs and fail on compilation failure
+        shell: bash
+        run: |
+          set -euo pipefail
+          gh run watch "$BUILD_RUN_ID" --repo "$GITHUB_REPOSITORY" --exit-status
+
+      - name: Download exact successful build artifact
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p release
+          gh run download "$BUILD_RUN_ID" --repo "$GITHUB_REPOSITORY" \
+            --name JimVulkan-H42-Kirin990-v1.0.0-stable --dir release
+          find release -maxdepth 1 -type f -printf '%f %s bytes\n'
+
+      - name: Verify provenance, checksums, and binary identity
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import hashlib, json, os
+          from pathlib import Path
+          from zipfile import ZipFile
+          base = Path('release')
+          manifest = json.loads((base/'SHA256SUMS.json').read_text())
+          if manifest['git_commit'] != os.environ['BUILD_SHA']:
+              raise SystemExit('Release artifact source SHA mismatch')
+          if len(manifest['packages']) != 2:
+              raise SystemExit('Expected exactly two release ZIP files')
+          elf_hashes = []
+          for p in manifest['packages']:
+              path = base / p['filename']
+              if hashlib.sha256(path.read_bytes()).hexdigest() != p['sha256']:
+                  raise SystemExit('Package SHA256 mismatch: ' + str(path))
+              with ZipFile(path) as z:
+                  metadata = json.loads(z.read('meta.json'))
+                  binary = z.read(metadata['libraryName'])
+                  elf_hashes.append(hashlib.sha256(binary).hexdigest())
+                  if elf_hashes[-1] != manifest['elf_sha256']:
+                      raise SystemExit('ELF digest mismatch: ' + str(path))
+              print('Verified:', path.name)
+          if len(set(elf_hashes)) != 1:
+              raise SystemExit('Generic and ARMSX2 payloads differ')
+          print('ELF SHA256:', manifest['elf_sha256'])
+          PY
+
+      - name: Publish GitHub Release with both packages
+        shell: bash
+        run: |
+          set -euo pipefail
+          if gh release view "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            echo "Release tag already exists. Refusing to overwrite."
+            exit 1
+          fi
+          gh release create "$RELEASE_TAG" \
+             release/JimVulkan-H42-Kirin990-v1.0.0-generic.zip \
+             release/JimVulkan-H42-Kirin990-v1.0.0-ARMSX2.zip \
+             release/SHA256SUMS.json \
+             --repo "$GITHUB_REPOSITORY" \
+             --target "$BUILD_SHA" \
+             --title "JimVulkan H42 Kirin990 Stable v1.0.0" \
+             --notes-file H42_KIRIN990_STABLE.md \
+             --latest
