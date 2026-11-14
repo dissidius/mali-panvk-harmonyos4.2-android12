@@ -20,6 +20,8 @@
 
 #include <errno.h>
 #include <poll.h>
+#include <string.h>
+#include <sys/system_properties.h>
 #include <unistd.h>
 
 #include "util/log.h"
@@ -427,6 +429,23 @@ panvk_android_is_kbase(VkDevice device)
    return pan_kmod_dev_is_kbase(phys_dev->kmod.dev);
 }
 
+/*
+ * Huawei/Kirin 990's gralloc can return an incompatible compressed display
+ * buffer even when asked for NO_AFBC + HW_COMPOSER. On HarmonyOS 4.2,
+ * requesting CPU-read access also produces importable linear scanout buffers.
+ * Keep this extra allocation constraint limited to the measured kbase SoC.
+ */
+static bool
+panvk_android_needs_linear_scanout(VkDevice device)
+{
+   if (!panvk_android_is_kbase(device))
+      return false;
+
+   char hardware[PROP_VALUE_MAX] = {0};
+   return __system_property_get("ro.hardware", hardware) > 0 &&
+          strcmp(hardware, "kirin990") == 0;
+}
+
 VKAPI_ATTR VkResult VKAPI_CALL
 panvk_GetSwapchainGrallocUsageANDROID(VkDevice device, VkFormat format,
                                       VkImageUsageFlags imageUsage, int *grallocUsage)
@@ -434,24 +453,9 @@ panvk_GetSwapchainGrallocUsageANDROID(VkDevice device, VkFormat format,
    VkResult result =
       vk_common_GetSwapchainGrallocUsageANDROID(device, format, imageUsage, grallocUsage);
    if (result == VK_SUCCESS && panvk_android_is_kbase(device)) {
-      /*
-       * H42LINEAR A/B TEST: On this isolated experimental branch only,
-       * request CPU-readable scanout buffers to test whether Huawei gralloc
-       * can return linear dma-bufs. No CPU readback is actually performed.
-       * Do not merge this workaround without device-side validation.
-       */
-      const int before = *grallocUsage;
-      *grallocUsage |= MALI_GRALLOC_USAGE_NO_AFBC |
-                       GRALLOC_USAGE_HW_COMPOSER |
-                       GRALLOC_USAGE_SW_READ_RARELY;
-      static unsigned h42_legacy_usage_calls;
-      const unsigned n = __atomic_add_fetch(&h42_legacy_usage_calls, 1,
-                                             __ATOMIC_RELAXED);
-      if (n <= 8)
-         mesa_logw("H42LINEAR legacy usage #%u: format=%d imageUsage=0x%x "
-                   "before=0x%x after=0x%x",
-                   n, (int)format, (unsigned)imageUsage,
-                   (unsigned)before, (unsigned)*grallocUsage);
+      *grallocUsage |= MALI_GRALLOC_USAGE_NO_AFBC | GRALLOC_USAGE_HW_COMPOSER;
+      if (panvk_android_needs_linear_scanout(device))
+         *grallocUsage |= GRALLOC_USAGE_SW_READ_RARELY;
    }
    return result;
 }
@@ -468,22 +472,10 @@ panvk_GetSwapchainGrallocUsage2ANDROID(VkDevice device, VkFormat format,
       device, format, imageUsage, swapchainImageUsage, grallocConsumerUsage,
       grallocProducerUsage);
    if (result == VK_SUCCESS && panvk_android_is_kbase(device)) {
-      const uint64_t producer_before = *grallocProducerUsage;
-      const uint64_t consumer_before = *grallocConsumerUsage;
       *grallocProducerUsage |= MALI_GRALLOC_USAGE_NO_AFBC;
-      *grallocConsumerUsage |= GRALLOC_USAGE_HW_COMPOSER |
-                               GRALLOC1_CONSUMER_USAGE_CPU_READ;
-      static unsigned h42_usage2_calls;
-      const unsigned n = __atomic_add_fetch(&h42_usage2_calls, 1,
-                                             __ATOMIC_RELAXED);
-      if (n <= 8)
-         mesa_logw("H42LINEAR usage2 #%u: format=%d imageUsage=0x%x "
-                   "producer=0x%llx->0x%llx consumer=0x%llx->0x%llx",
-                   n, (int)format, (unsigned)imageUsage,
-                   (unsigned long long)producer_before,
-                   (unsigned long long)*grallocProducerUsage,
-                   (unsigned long long)consumer_before,
-                   (unsigned long long)*grallocConsumerUsage);
+      *grallocConsumerUsage |= GRALLOC_USAGE_HW_COMPOSER;
+      if (panvk_android_needs_linear_scanout(device))
+         *grallocConsumerUsage |= GRALLOC1_CONSUMER_USAGE_CPU_READ;
    }
    return result;
 }
