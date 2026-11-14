@@ -3,6 +3,12 @@
  * SPDX-License-Identifier: MIT
  */
 
+/* Keep the Android gralloc definitions before PanVK's fallback definitions. */
+#include <hardware/gralloc.h>
+#if ANDROID_API_LEVEL >= 26
+#include <hardware/gralloc1.h>
+#endif
+
 #include "panvk_android.h"
 
 #include "panvk_device.h"
@@ -466,7 +472,7 @@ panvk_GetSwapchainGrallocUsage2ANDROID(VkDevice device, VkFormat format,
       const uint64_t consumer_before = *grallocConsumerUsage;
       *grallocProducerUsage |= MALI_GRALLOC_USAGE_NO_AFBC;
       *grallocConsumerUsage |= GRALLOC_USAGE_HW_COMPOSER |
-                               GRALLOC_USAGE_SW_READ_RARELY;
+                               GRALLOC1_CONSUMER_USAGE_CPU_READ;
       static unsigned h42_usage2_calls;
       const unsigned n = __atomic_add_fetch(&h42_usage2_calls, 1,
                                              __ATOMIC_RELAXED);
